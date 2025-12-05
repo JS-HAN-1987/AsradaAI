@@ -27,40 +27,63 @@ ESP_RECONNECT_INTERVAL = 10
 USE_FAKE_OBD = False
 
 # ====================================
-# GPIO 버튼 설정 (라즈베리파이용)
-# ====================================
-BUTTON_PIN = 17  # GPIO17 (Physical pin 11)
-
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-# ====================================
 # 전역 객체
 # ====================================
 if USE_FAKE_OBD:
     print("[INFO] 🎭 가상 OBD 모드로 시작합니다.")
     from car_obd.fake_obd_connector import FakeOBDConnector
-
     g_obd_connector = FakeOBDConnector(port="COM4", baudrate=115200)
 else:
     print("[INFO] 🚗 실제 OBD 모드로 시작합니다.")
     from car_obd.obd_connector import OBDConnector
-
     g_obd_connector = OBDConnector(port="COM4", baudrate=115200)
 
 g_car_history = CarDataHistory(max_size=HISTORY_SIZE)
 g_alert_checker = AlertChecker()
 g_esp = AsradaHeadOrchestrator(g_car_history, esp_ip="192.168.219.110", esp_port=1234)
 
+# ====================================
+# GPIO 설정
+# ====================================
+BUTTON_PIN = 17
 
-# 🆕 중복 실행 방지 개선: controller 내부에서 관리하므로 제거
-# (AsradaHeadOrchestrator._event_in_progress로 대체)
+def init_gpio_button():
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    print("[INFO] GPIO 버튼 폴링 방식으로 초기화 완료")
+
+def gpio_button_polling_loop():
+    """
+    버튼 1->0 변화를 폴링 방식으로 감지
+    """
+    last = GPIO.input(BUTTON_PIN)
+
+    while True:
+        try:
+            cur = GPIO.input(BUTTON_PIN)
+
+            if last == 1 and cur == 0:
+                print("[GPIO] Button Press Detected")
+
+                threading.Thread(
+                    target=g_esp.on_button_press_event,
+                    args=("full",),
+                    daemon=True
+                ).start()
+
+                time.sleep(0.3)
+
+            last = cur
+            time.sleep(0.5)
+
+        except Exception as e:
+            print("[ERROR] GPIO Polling 오류:", e)
+            time.sleep(0.5)
 
 # ====================================
-# OBD 데이터 수집 스레드
+# OBD 스레드
 # ====================================
 def obd_collection_thread():
-    """OBD 데이터 수집 스레드"""
     print("[INFO] OBD collection thread started.")
     while True:
         try:
@@ -75,17 +98,6 @@ def obd_collection_thread():
             snapshot = g_obd_connector.collect_data()
             g_car_history.add(snapshot)
 
-            speed = snapshot.get_speed_value()
-            rpm = snapshot.get_rpm_value()
-
-            if USE_FAKE_OBD:
-                prefix = "🎭 [FAKE]"
-            else:
-                prefix = "🚗 [REAL]"
-
-            dtc_count = len(snapshot.dtc_list)
-            dtc_info = f"DTC: {dtc_count}" if dtc_count > 0 else "No DTC"
-
             elapsed = time.time() - start
             time.sleep(max(0, COLLECT_INTERVAL - elapsed))
 
@@ -93,14 +105,11 @@ def obd_collection_thread():
             print(f"[ERROR] OBD collection error: {e}")
             time.sleep(ESP_RECONNECT_INTERVAL)
 
-
 # ====================================
-# 알림 모니터링 스레드
+# 알림 모니터
 # ====================================
 def alert_monitor_thread():
-    """별도 스레드에서 실시간 알림 체크"""
     print("[INFO] Alert monitoring thread started.")
-
     while True:
         try:
             if not g_obd_connector.is_connected():
@@ -113,27 +122,20 @@ def alert_monitor_thread():
                 continue
 
             previous = g_car_history.get_previous(1)
-
             alerts = g_alert_checker.check_all(current, previous)
 
             for alert in alerts:
                 g_esp.speak(alert)
+
         except Exception as e:
             print(f"[ERROR] OBD alert_monitor error: {e}")
             time.sleep(ESP_RECONNECT_INTERVAL)
 
-
 # ====================================
-# ESP 버튼 콜백
+# ESP 버튼 (ESP 장치에서 오는 신호용)
 # ====================================
 def on_button(msg):
-    """
-    🆕 단순화된 버튼 핸들러
-    중복 실행 방지는 controller 내부에서 처리
-    """
     if msg == "BUTTON_PRESS":
-
-        # 메인 스레드를 차단하지 않도록 별도 스레드에서 실행
         threading.Thread(
             target=g_esp.on_button_press_event,
             args=("full",),
@@ -141,30 +143,26 @@ def on_button(msg):
         ).start()
 
 # ====================================
-# GPIO 버튼 콜백
+# main()
 # ====================================
-def gpio_button_callback(channel):
-    print("[GPIO] Button pressed!")
+def main():
+
+    # -------------------------
+    # GPIO 버튼 초기화
+    # -------------------------
+    print("[INFO] GPIO 버튼 초기화 시작...")
+    init_gpio_button()
+
+    # 버튼 폴링 스레드 시작
     threading.Thread(
-        target=g_esp.on_button_press_event,
-        args=("full",),
+        target=gpio_button_polling_loop,
         daemon=True
     ).start()
+    print("[INFO] GPIO 버튼 폴링 스레드 시작됨")
 
-
-def main():
-    global g_esp, g_obd_connector
-
-    # GPIO 버튼 이벤트 추가
-    GPIO.add_event_detect(
-        BUTTON_PIN,
-        GPIO.FALLING,
-        callback=gpio_button_callback,
-        bouncetime=200  # 채터링 방지
-    )
-
-
+    # -------------------------
     # ESP 초기화
+    # -------------------------
     g_esp.button_callback = on_button
     esp_connected = False
     try:
@@ -178,7 +176,9 @@ def main():
         g_esp.speak(f"Exception ESP 연결 실패: {e}")
         esp_connected = False
 
+    # -------------------------
     # OBD 초기화
+    # -------------------------
     try:
         if g_obd_connector.connect():
             if g_obd_connector.is_fake():
@@ -188,14 +188,15 @@ def main():
         else:
             g_esp.speak("OBD 연결 실패.")
 
-        obd_thread = threading.Thread(target=obd_collection_thread, daemon=True)
-        obd_thread.start()
-        alert_thread = threading.Thread(target=alert_monitor_thread, daemon=True)
-        alert_thread.start()
+        threading.Thread(target=obd_collection_thread, daemon=True).start()
+        threading.Thread(target=alert_monitor_thread, daemon=True).start()
 
     except Exception as e:
         g_esp.speak("OBD 연결 실패. Exception 발생")
 
+    # -------------------------
+    # 입력 루프
+    # -------------------------
     print("\n" + "=" * 60)
     print("입력 테스트: 질문 직접 입력 = STT 건너뛰기 모드")
     print("t 입력 시 STT 포함 전체 시퀀스")
@@ -205,14 +206,13 @@ def main():
     try:
         while True:
             status_indicator = "🟢" if g_esp.is_connected() else "🔴"
+
             if not g_esp.is_connected():
                 try:
                     esp_connected = g_esp.connect()
                     if esp_connected:
                         g_esp.servo_set(2, 90)
                         g_esp.speak("ESP 연결 성공")
-                    else:
-                        print("[WARN] ESP 초기 연결 실패")
                 except Exception as e:
                     print(f"[WARN] ESP 연결 실패: {e}")
 
@@ -222,14 +222,12 @@ def main():
                 break
 
             if line.strip().lower() == "t":
-                print("t 입력 - STT 포함 전체 시퀀스\n")
                 threading.Thread(
                     target=g_esp.on_button_press_event,
                     args=("full",),
                     daemon=True
                 ).start()
             else:
-                print("질문 입력 → STT 생략 모드\n")
                 threading.Thread(
                     target=g_esp.on_button_press_event,
                     args=("skip_stt", line),
@@ -240,6 +238,7 @@ def main():
         print("\n[INFO] 프로그램 종료")
 
     finally:
+        GPIO.cleanup()
         if g_obd_connector:
             g_obd_connector.disconnect()
             print(f"[INFO] OBD 수집 종료 - 총 {g_car_history.size()}개 스냅샷")

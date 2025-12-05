@@ -8,6 +8,7 @@ from car_obd.alert_checker import AlertChecker
 import os
 import warnings
 import sys
+import RPi.GPIO as GPIO
 
 # 오디오 오류만 필터링
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = 'hide'
@@ -24,6 +25,14 @@ HISTORY_SIZE = 3
 ESP_RECONNECT_INTERVAL = 10
 
 USE_FAKE_OBD = False
+
+# ====================================
+# GPIO 버튼 설정 (라즈베리파이용)
+# ====================================
+BUTTON_PIN = 17  # GPIO17 (Physical pin 11)
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 # ====================================
 # 전역 객체
@@ -131,9 +140,29 @@ def on_button(msg):
             daemon=True
         ).start()
 
+# ====================================
+# GPIO 버튼 콜백
+# ====================================
+def gpio_button_callback(channel):
+    print("[GPIO] Button pressed!")
+    threading.Thread(
+        target=g_esp.on_button_press_event,
+        args=("full",),
+        daemon=True
+    ).start()
+
 
 def main():
     global g_esp, g_obd_connector
+
+    # GPIO 버튼 이벤트 추가
+    GPIO.add_event_detect(
+        BUTTON_PIN,
+        GPIO.FALLING,
+        callback=gpio_button_callback,
+        bouncetime=200  # 채터링 방지
+    )
+
 
     # ESP 초기화
     g_esp.button_callback = on_button

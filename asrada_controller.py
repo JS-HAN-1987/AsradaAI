@@ -108,16 +108,8 @@ class AsradaHeadOrchestrator:
     # -------------------------------
     def _on_head_message(self, msg):
         """head 소켓에서 수신된 문자열 처리"""
-        if msg == "BUTTON_PRESS":
-            if self._event_in_progress or (current_audio_process is not None):
-                # 동작 중이거나 TTS 재생 중일 때: 중단
-                print("[Controller] 🔴 중단 버튼 감지 (동작/TTS 재생 중)")
-                self.cancel_current_event()
-            else:
-                # 중지 상태일 때: 동작 시작
-                print("[Controller] 🟢 시작 버튼 감지 (중지 상태)")
-                if self.button_callback:
-                    self.button_callback("BUTTON_PRESS")
+        if msg == "BUTTON_PRESS" and self.button_callback:
+            self.button_callback("BUTTON_PRESS")
 
     # ---------------------------
     # servo1 패턴 (동기)

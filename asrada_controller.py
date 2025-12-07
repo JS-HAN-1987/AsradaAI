@@ -4,10 +4,8 @@ import time
 import socket
 from collections import deque
 import random
-
-from asrada_head import head
 from my_stt import listen
-from my_tts import speak, stop_current_speech, play_beep, force_stop_flag, current_audio_process, is_tts_active
+from my_tts import speak, speak_immediate, stop_current_speech, play_beep, force_stop_flag, current_audio_process, is_tts_active, set_head
 from car_ai.response_generators import stop_all_llm, reset_llm_stop, STOP_LLM_FLAG
 from car_ai.car_ai_system import CarAISystem
 
@@ -22,8 +20,19 @@ class AsradaHeadOrchestrator:
     AsradaHead 이용한 전체 시퀀스 오케스트레이터.
     """
 
-    def __init__(self, car_history, esp_hostname=None, esp_port=1234):
-        self.esp = head
+    def __init__(self, car_history, esp_hostname=None, esp_port=1234, is_fake=False):
+        if is_fake:
+            print("[INFO] 🎭 가상 ESP8266 모드로 시작합니다.")
+            from fake_asrada_head import fake_head
+            # asrada_head 모듈의 head 객체를 fake_head로 교체하는 트릭
+            self.esp = fake_head  # 모듈의 전역 head 객체를 교체
+        else:
+            print("[INFO] 🔌 실제 ESP8266 모드로 시작합니다.")
+            from asrada_head import head
+            self.esp = head
+        speak_immediate("시스템을 초기화하고 있습니다.")
+
+        set_head(self.esp)
         if esp_hostname:
             self.esp.set_config(esp_hostname, esp_port)
         else:

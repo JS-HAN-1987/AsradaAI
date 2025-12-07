@@ -18,13 +18,15 @@ warnings.filterwarnings("ignore")
 # ====================================
 # 설정
 # ====================================
+USE_FAKE_OBD = True
+USE_FAKE_ESP = True  # 🆕 ESP8266 시뮬레이션 여부 (False: 실제 ESP, True: 시뮬레이션)
+USE_GPIO = False  # GPIO 사용 여부 (라즈베리파이에서는 True, Windows에서는 False로 설정)
+
+
 COLLECT_INTERVAL = 3
 ALERT_CHECK_INTERVAL = 1
 HISTORY_SIZE = 3
 ESP_RECONNECT_INTERVAL = 10
-
-USE_FAKE_OBD = True
-USE_GPIO = True  # GPIO 사용 여부 (라즈베리파이에서는 True, Windows에서는 False로 설정)
 
 # ====================================
 # 전역 객체
@@ -206,7 +208,10 @@ def main():
         esp_connected = g_esp.connect()
         if esp_connected:
             g_esp.servo_set(2, 90)
-            g_esp.speak("ESP 연결 성공!")
+            if USE_FAKE_ESP:
+                g_esp.speak("가상 ESP 연결 성공!")
+            else:
+                g_esp.speak("ESP 연결 성공!")
         else:
             g_esp.speak("ESP 초기 연결 실패")
     except Exception as e:
@@ -268,7 +273,9 @@ def main():
     else:
         # GPIO 비활성화 모드: 키보드 입력 활성화
         print("\n" + "=" * 60)
-        print(f"시스템 상태: OBD={'가상' if USE_FAKE_OBD else '실제'}, GPIO={'활성화' if USE_GPIO else '비활성화'}")
+        print(f"시스템 상태: OBD={'가상' if USE_FAKE_OBD else '실제'}, "
+              f"ESP={'가상' if USE_FAKE_ESP else '실제'}, "
+              f"GPIO={'활성화' if USE_GPIO else '비활성화'}")
         print("입력 테스트: 질문 직접 입력 = STT 건너뛰기 모드")
         print("t 입력 시 STT 포함 전체 시퀀스")
         print("c 입력 시 현재 진행 중인 이벤트 중단")

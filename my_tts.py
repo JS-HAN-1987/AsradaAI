@@ -19,27 +19,9 @@ stop_speech_flag = threading.Event()
 force_stop_flag = threading.Event()  # 🆕 강제 중단 플래그 추가
 current_audio_process = None
 
-def log_info(message: str):
-    """일반 정보 로그 출력."""
-    if LOGGING_ENABLED:
-        print(message)
-
-def log_error(message: str):
-    """오류 로그 출력."""
-    # 오류 메시지는 로깅 여부와 관계없이 출력합니다.
-    print(f"❌ {message}")
-
 os.environ["ALSA_LOG_LEVEL"] = "0"
 
-# ====== 싱글톤 import (LED 제어용) ======
-try:
-    from asrada_head import head
-except ImportError:
-    class DummyHead:
-        def send_led_level(self, level: int):
-            pass
-    head = DummyHead()
-    log_info("⚠️ 'asrada_head' 모듈이 없어 더미 객체 사용")
+asrada_head = None
 
 # ====== 전역 변수 ======
 audio_queue = queue.Queue()
@@ -58,6 +40,17 @@ BEEP_FILE_PATH: str = os.path.join(os.getcwd(), BEEP_FILE_NAME)
 AUX_DEVICE_NAME = "Headphones"
 GLOBAL_PYAUDIO: Optional[pyaudio.PyAudio] = None
 AUX_DEVICE_INDEX: Optional[int] = None
+
+
+def log_info(message: str):
+    """일반 정보 로그 출력."""
+    if LOGGING_ENABLED:
+        print(message)
+
+def log_error(message: str):
+    """오류 로그 출력."""
+    # 오류 메시지는 로깅 여부와 관계없이 출력합니다.
+    print(f"❌ {message}")
 
 def get_aux_device_index(p: pyaudio.PyAudio):
     """'Headphones' 장치를 찾아 인덱스를 반환합니다."""
@@ -170,9 +163,9 @@ def stop_current_speech():
     force_stop_flag.set()
     stop_speech_flag.set()
     
-    if head:
+    if asrada_head:
         try:
-            head.send_led_level(0)
+            asrada_head.send_led_level(0)
         except:
             pass
     
@@ -194,6 +187,9 @@ def stop_current_speech():
     time.sleep(0.1)
     force_stop_flag.clear()
 
+def set_head(head):
+    global asrada_head
+    asrada_head = head
 
 def is_tts_active():
     """TTS가 활성 상태인지 확인 (current_audio_process + audio_queue 확인)"""
@@ -217,7 +213,7 @@ def play_and_monitor_sync(file_path: str, sound: AudioSegment):
 
     with _audio_resource_lock:
         current_audio_process = "playing"
-        log_info("audio playing")
+        # log_info("audio playing")
         
         # 강제 중단 플래그 확인
         if force_stop_flag.is_set():
@@ -239,8 +235,8 @@ def play_and_monitor_sync(file_path: str, sound: AudioSegment):
             num_frames = len(sound_data) // sound.frame_width
             CHUNK_SIZE = int(sound.frame_rate * 0.02)
 
-            if head:
-                head.send_led_level(0)
+            if asrada_head:
+                asrada_head.send_led_level(0)
 
             i = 0
             while i < num_frames and not stop_speech_flag.is_set() and not force_stop_flag.is_set():
@@ -255,7 +251,7 @@ def play_and_monitor_sync(file_path: str, sound: AudioSegment):
                 stream.write(chunk_data)
 
                 # LED 레벨 계산
-                if not force_stop_flag.is_set() and head:
+                if not force_stop_flag.is_set() and asrada_head:
                     chunk_segment = sound._spawn(chunk_data)
                     samples = np.array(chunk_segment.get_array_of_samples()) / (2 ** 15)
                     rms = np.sqrt(np.mean(samples ** 2)) if len(samples) > 0 else 0
@@ -264,7 +260,7 @@ def play_and_monitor_sync(file_path: str, sound: AudioSegment):
                     elif level_db < -30: led_level = 1
                     elif level_db < -20: led_level = 2
                     else: led_level = 3
-                    head.send_led_level(led_level)
+                    asrada_head.send_led_level(led_level)
 
                 i = end_frame
         
@@ -274,7 +270,7 @@ def play_and_monitor_sync(file_path: str, sound: AudioSegment):
 
         finally:
             current_audio_process = None
-            log_info("audio None")
+            # log_info("audio None")
             if stream: 
                 try:
                     stream.stop_stream()
@@ -282,8 +278,8 @@ def play_and_monitor_sync(file_path: str, sound: AudioSegment):
                 except:
                     pass
                     
-            if head and not force_stop_flag.is_set():
-                head.send_led_level(0)
+            if asrada_head and not force_stop_flag.is_set():
+                asrada_head.send_led_level(0)
                 
             stop_speech_flag.clear()
 
@@ -370,6 +366,58 @@ def speak(text: str, speed: float = 1.6, pitch: float = -4.0,
     except Exception as e:
         log_error(f"speak() 오류: {e}")
 
+
+def speak_immediate(text: str, speed: float = 1.6, pitch: float = -4.0,
+                    echo_delay_ms: int = 70, echo_decay: float = 0.5) -> None:
+    """
+    텍스트를 즉시 음성으로 출력 (기존 발화 중단 없이)
+    재생이 끝나면 함수 종료
+    """
+    if not text:
+        return
+
+    log_info(f"🤖 [즉시] {text}")
+
+    try:
+        # 음성 파일 생성
+        tts_path = create_robot_tts_file(text, speed, pitch, echo_delay_ms, echo_decay)
+
+        if not os.path.exists(tts_path):
+            log_error("TTS 파일 생성 실패")
+            return
+
+        # 바로 재생
+        sound = AudioSegment.from_file(tts_path)
+
+        if GLOBAL_PYAUDIO is None or AUX_DEVICE_INDEX is None:
+            log_error("재생 환경 준비 미흡.")
+            return
+
+        with _audio_resource_lock:
+            # 스트림 열기
+            stream = GLOBAL_PYAUDIO.open(
+                format=GLOBAL_PYAUDIO.get_format_from_width(sound.sample_width),
+                channels=sound.channels,
+                rate=sound.frame_rate,
+                output=True,
+                output_device_index=AUX_DEVICE_INDEX
+            )
+
+            # 전체 오디오 데이터를 한 번에 재생
+            stream.write(sound.raw_data)
+
+            # 재생 완료 대기
+            stream.stop_stream()
+            stream.close()
+
+            # 임시 파일 삭제
+            try:
+                os.remove(tts_path)
+            except:
+                pass
+
+    except Exception as e:
+        log_error(f"speak_immediate() 오류: {e}")
 
 # 🌟 stop_tts 함수
 def stop_tts():

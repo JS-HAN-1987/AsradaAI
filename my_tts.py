@@ -14,6 +14,10 @@ from typing import Optional, Tuple, Dict, Any
 # 🌟 로깅 설정
 # =======================================================
 LOGGING_ENABLED = True  # 이 플래그를 False로 바꾸면 모든 로그 출력이 비활성화됩니다.
+# 전역 변수에 중단 플래그 추가
+stop_speech_flag = threading.Event()
+force_stop_flag = threading.Event()  # 🆕 강제 중단 플래그 추가
+current_audio_process = None
 
 def log_info(message: str):
     """일반 정보 로그 출력."""
@@ -158,12 +162,20 @@ def create_robot_tts_file(text: str, speed: float = 1.4, pitch: float = -4.0,
 
 def stop_current_speech():
     """현재 재생 중인 오디오를 즉시 중단하고 큐를 비웁니다."""
-    global stop_speech_flag, current_audio_process
-    if current_audio_process is None: return
-
-    log_info("🛑 음성 중단 요청")
+    global stop_speech_flag, current_audio_process, force_stop_flag
+    
+    log_info("🛑 음성 강제 중단 요청")
+    
+    # 강제 중단 플래그 설정
+    force_stop_flag.set()
     stop_speech_flag.set()
-    head.send_led_level(0)
+    
+    if head:
+        try:
+            head.send_led_level(0)
+        except:
+            pass
+    
     current_audio_process = None
 
     # 큐 비우기
@@ -171,15 +183,33 @@ def stop_current_speech():
         while True:
             item = audio_queue.get_nowait()
             if isinstance(item, str) and os.path.exists(item):
-                os.remove(item)
+                try:
+                    os.remove(item)
+                except:
+                    pass
             audio_queue.task_done()
-    except queue.Empty: pass
+    except queue.Empty: 
+        pass
 
-    time.sleep(0.3)
+    time.sleep(0.1)
+    force_stop_flag.clear()
+
+
+def is_tts_active():
+    """TTS가 활성 상태인지 확인 (current_audio_process + audio_queue 확인)"""
+    # current_audio_process 확인
+    if current_audio_process is not None:
+        return True
+
+    # audio_queue 확인 (큐에 대기 중인 항목이 있는지)
+    try:
+        return audio_queue.qsize() > 0
+    except:
+        return False
 
 def play_and_monitor_sync(file_path: str, sound: AudioSegment):
     """오디오 데이터를 재생하고 LED 레벨을 모니터링합니다."""
-    global stop_speech_flag, current_audio_process
+    global stop_speech_flag, current_audio_process, force_stop_flag
 
     if GLOBAL_PYAUDIO is None or AUX_DEVICE_INDEX is None:
         log_error("재생 환경 준비 미흡.")
@@ -187,7 +217,15 @@ def play_and_monitor_sync(file_path: str, sound: AudioSegment):
 
     with _audio_resource_lock:
         current_audio_process = "playing"
-        if stop_speech_flag.is_set(): stop_speech_flag.clear()
+        log_info("audio playing")
+        
+        # 강제 중단 플래그 확인
+        if force_stop_flag.is_set():
+            log_info("🚫 강제 중단 - 재생 취소")
+            return
+            
+        if stop_speech_flag.is_set(): 
+            stop_speech_flag.clear()
         
         stream = None
         try:
@@ -201,10 +239,15 @@ def play_and_monitor_sync(file_path: str, sound: AudioSegment):
             num_frames = len(sound_data) // sound.frame_width
             CHUNK_SIZE = int(sound.frame_rate * 0.02)
 
-            head.send_led_level(0)
+            if head:
+                head.send_led_level(0)
 
             i = 0
-            while i < num_frames and not stop_speech_flag.is_set():
+            while i < num_frames and not stop_speech_flag.is_set() and not force_stop_flag.is_set():
+                # 강제 중단 체크
+                if force_stop_flag.is_set():
+                    break
+                    
                 start_frame = i
                 end_frame = min(i + CHUNK_SIZE, num_frames)
                 chunk_data = sound_data[start_frame * sound.frame_width: end_frame * sound.frame_width]
@@ -212,25 +255,36 @@ def play_and_monitor_sync(file_path: str, sound: AudioSegment):
                 stream.write(chunk_data)
 
                 # LED 레벨 계산
-                chunk_segment = sound._spawn(chunk_data)
-                samples = np.array(chunk_segment.get_array_of_samples()) / (2 ** 15)
-                rms = np.sqrt(np.mean(samples ** 2)) if len(samples) > 0 else 0
-                level_db = 20 * np.log10(rms) if rms > 0 else -100
-                if level_db < -40: led_level = 0
-                elif level_db < -30: led_level = 1
-                elif level_db < -20: led_level = 2
-                else: led_level = 3
-                head.send_led_level(led_level)
+                if not force_stop_flag.is_set() and head:
+                    chunk_segment = sound._spawn(chunk_data)
+                    samples = np.array(chunk_segment.get_array_of_samples()) / (2 ** 15)
+                    rms = np.sqrt(np.mean(samples ** 2)) if len(samples) > 0 else 0
+                    level_db = 20 * np.log10(rms) if rms > 0 else -100
+                    if level_db < -40: led_level = 0
+                    elif level_db < -30: led_level = 1
+                    elif level_db < -20: led_level = 2
+                    else: led_level = 3
+                    head.send_led_level(led_level)
 
                 i = end_frame
         
         except Exception as e:
-            log_error(f"재생 중 오류: {e}")
+            if not force_stop_flag.is_set():
+                log_error(f"재생 중 오류: {e}")
 
         finally:
             current_audio_process = None
-            if stream: stream.stop_stream(); stream.close()
-            head.send_led_level(0)
+            log_info("audio None")
+            if stream: 
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except:
+                    pass
+                    
+            if head and not force_stop_flag.is_set():
+                head.send_led_level(0)
+                
             stop_speech_flag.clear()
 
 def audio_worker():

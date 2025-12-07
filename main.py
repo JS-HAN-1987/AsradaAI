@@ -8,7 +8,6 @@ from car_obd.alert_checker import AlertChecker
 import os
 import warnings
 import sys
-import RPi.GPIO as GPIO
 
 # 오디오 오류만 필터링
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = 'hide'
@@ -17,14 +16,15 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = 'hide'
 warnings.filterwarnings("ignore")
 
 # ====================================
-# OBD 설정
+# 설정
 # ====================================
 COLLECT_INTERVAL = 3
 ALERT_CHECK_INTERVAL = 1
 HISTORY_SIZE = 3
 ESP_RECONNECT_INTERVAL = 10
 
-USE_FAKE_OBD = False
+USE_FAKE_OBD = True
+USE_GPIO = False  # GPIO 사용 여부 (Windows에서는 False로 설정)
 
 # ====================================
 # 전역 객체
@@ -32,33 +32,67 @@ USE_FAKE_OBD = False
 if USE_FAKE_OBD:
     print("[INFO] 🎭 가상 OBD 모드로 시작합니다.")
     from car_obd.fake_obd_connector import FakeOBDConnector
+
     g_obd_connector = FakeOBDConnector(port="COM4", baudrate=115200)
 else:
     print("[INFO] 🚗 실제 OBD 모드로 시작합니다.")
     from car_obd.obd_connector import OBDConnector
+
     g_obd_connector = OBDConnector(port="COM4", baudrate=115200)
 
 g_car_history = CarDataHistory(max_size=HISTORY_SIZE)
 g_alert_checker = AlertChecker()
-g_esp = AsradaHeadOrchestrator(g_car_history, esp_ip="192.168.219.110", esp_port=1234)
+g_esp = AsradaHeadOrchestrator(g_car_history, esp_hostname="esp8266-d3c2cf.local", esp_port=1234)
 
 # ====================================
-# GPIO 설정
+# GPIO 설정 (USE_GPIO가 True일 때만)
 # ====================================
-BUTTON_PIN = 17
+if USE_GPIO:
+    try:
+        import RPi.GPIO as GPIO
+
+        GPIO_AVAILABLE = True
+        BUTTON_PIN = 17
+    except ImportError as e:
+        print(f"[WARN] RPi.GPIO를 불러올 수 없습니다: {e}")
+        print("[WARN] GPIO 기능을 비활성화합니다.")
+        USE_GPIO = False
+        GPIO_AVAILABLE = False
+else:
+    GPIO_AVAILABLE = False
+    print("[INFO] GPIO 기능이 비활성화되었습니다.")
+
 
 def init_gpio_button():
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    print("[INFO] GPIO 버튼 폴링 방식으로 초기화 완료")
+    """GPIO 버튼 초기화"""
+    if not USE_GPIO or not GPIO_AVAILABLE:
+        print("[INFO] GPIO 비활성화 상태 - 버튼 초기화 건너뜀")
+        return
+
+    try:
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        print("[INFO] GPIO 버튼 폴링 방식으로 초기화 완료")
+    except Exception as e:
+        print(f"[ERROR] GPIO 초기화 오류: {e}")
+        USE_GPIO = False
+
 
 def gpio_button_polling_loop():
     """
     버튼 1->0 변화를 폴링 방식으로 감지
     """
-    last = GPIO.input(BUTTON_PIN)
+    if not USE_GPIO or not GPIO_AVAILABLE:
+        print("[INFO] GPIO 비활성화 상태 - 버튼 폴링 루프 종료")
+        return
 
-    while True:
+    try:
+        last = GPIO.input(BUTTON_PIN)
+    except Exception as e:
+        print(f"[ERROR] GPIO 입력 읽기 실패: {e}")
+        return
+
+    while USE_GPIO and GPIO_AVAILABLE:
         try:
             cur = GPIO.input(BUTTON_PIN)
 
@@ -79,6 +113,7 @@ def gpio_button_polling_loop():
         except Exception as e:
             print("[ERROR] GPIO Polling 오류:", e)
             time.sleep(0.5)
+
 
 # ====================================
 # OBD 스레드
@@ -104,6 +139,7 @@ def obd_collection_thread():
         except Exception as e:
             print(f"[ERROR] OBD collection error: {e}")
             time.sleep(ESP_RECONNECT_INTERVAL)
+
 
 # ====================================
 # 알림 모니터
@@ -131,6 +167,7 @@ def alert_monitor_thread():
             print(f"[ERROR] OBD alert_monitor error: {e}")
             time.sleep(ESP_RECONNECT_INTERVAL)
 
+
 # ====================================
 # ESP 버튼 (ESP 장치에서 오는 신호용)
 # ====================================
@@ -142,23 +179,26 @@ def on_button(msg):
             daemon=True
         ).start()
 
+
 # ====================================
 # main()
 # ====================================
 def main():
-
     # -------------------------
-    # GPIO 버튼 초기화
+    # GPIO 버튼 초기화 (활성화된 경우만)
     # -------------------------
-    print("[INFO] GPIO 버튼 초기화 시작...")
-    init_gpio_button()
+    if USE_GPIO:
+        print("[INFO] GPIO 버튼 초기화 시작...")
+        init_gpio_button()
 
-    # 버튼 폴링 스레드 시작
-    threading.Thread(
-        target=gpio_button_polling_loop,
-        daemon=True
-    ).start()
-    print("[INFO] GPIO 버튼 폴링 스레드 시작됨")
+        # 버튼 폴링 스레드 시작
+        threading.Thread(
+            target=gpio_button_polling_loop,
+            daemon=True
+        ).start()
+        print("[INFO] GPIO 버튼 폴링 스레드 시작됨")
+    else:
+        print("[INFO] GPIO 비활성화 - 버튼 기능 건너뜀")
 
     # -------------------------
     # ESP 초기화
@@ -198,8 +238,10 @@ def main():
     # 입력 루프
     # -------------------------
     print("\n" + "=" * 60)
+    print(f"시스템 상태: OBD={'가상' if USE_FAKE_OBD else '실제'}, GPIO={'활성화' if USE_GPIO else '비활성화'}")
     print("입력 테스트: 질문 직접 입력 = STT 건너뛰기 모드")
     print("t 입력 시 STT 포함 전체 시퀀스")
+    print("c 입력 시 현재 진행 중인 이벤트 중단")
     print("q 입력 시 종료")
     print("=" * 60 + "\n")
 
@@ -216,12 +258,15 @@ def main():
                 except Exception as e:
                     print(f"[WARN] ESP 연결 실패: {e}")
 
-            line = input(f"{status_indicator} > ")
+            line = input(f"{status_indicator} > ").strip()
 
-            if line.strip().lower() == "q":
+            if line.lower() == "q":
                 break
-
-            if line.strip().lower() == "t":
+            elif line.lower() == "c":
+                # 중단 명령
+                g_esp.cancel_current_event()
+                print("[MAIN] 현재 진행 중인 이벤트 중단 요청")
+            elif line.lower() == "t":
                 threading.Thread(
                     target=g_esp.on_button_press_event,
                     args=("full",),
@@ -238,7 +283,15 @@ def main():
         print("\n[INFO] 프로그램 종료")
 
     finally:
-        GPIO.cleanup()
+        # GPIO 정리 (활성화된 경우만)
+        if USE_GPIO and GPIO_AVAILABLE:
+            try:
+                GPIO.cleanup()
+                print("[INFO] GPIO 정리 완료")
+            except Exception as e:
+                print(f"[WARN] GPIO 정리 중 오류: {e}")
+
+        # OBD 연결 종료
         if g_obd_connector:
             g_obd_connector.disconnect()
             print(f"[INFO] OBD 수집 종료 - 총 {g_car_history.size()}개 스냅샷")

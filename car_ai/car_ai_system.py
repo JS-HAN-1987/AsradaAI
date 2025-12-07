@@ -12,7 +12,8 @@ from .retrieval import retrieve_data
 from .response_generators import (
     generate_car_data_response,
     generate_control_response,
-    generate_general_response
+    generate_general_response,
+    STOP_LLM_FLAG
 )
 
 import time
@@ -145,8 +146,18 @@ class CarAISystem:
         start_total = time.time()
         log(f"process_question() 호출, question: {question}")
 
+        # 🆕 시작 전 즉시 중단 체크
+        if STOP_LLM_FLAG.is_set():
+            log("처리 시작 전 중단됨")
+            return "처리가 중단되었습니다."
+
         # 질문 처리 전 벡터 DB 업데이트 (최신 데이터 반영)
         self.update_vector_db()
+
+        # 🆕 벡터 DB 업데이트 후 중단 체크
+        if STOP_LLM_FLAG.is_set():
+            log("벡터 DB 업데이트 후 중단됨")
+            return "처리가 중단되었습니다."
 
         state = GraphState(
             question=question,
@@ -163,19 +174,38 @@ class CarAISystem:
         state["question_type"] = classify_question(self.llm, question)
         log(f"1. 분류 완료 question_type = {state['question_type']}, 소요 시간: {time.time() - start_step:.3f}s")
 
+        # 🆕 분류 후 중단 체크
+        if STOP_LLM_FLAG.is_set():
+            log("분류 후 중단됨")
+            return "처리가 중단되었습니다."
+
         # 2. 데이터 검색
         start_step = time.time()
         state["context"], state["retrieved_docs"], state["confidence"] = retrieve_data(self.retriever, question)
         log(f"2. 데이터 검색 완료, context 길이: {len(state['context'])}, confidence: {state['confidence']:.3f}, 소요 시간: {time.time() - start_step:.3f}s")
 
+        # 🆕 검색 후 중단 체크
+        if STOP_LLM_FLAG.is_set():
+            log("검색 후 중단됨")
+            return "처리가 중단되었습니다."
+
         # 3. 응답 생성
         start_step = time.time()
-        if state["question_type"] == "car_control":
-            state["answer"] = generate_control_response(question)
-        elif state["question_type"] == "car_data":
-            state["answer"] = generate_car_data_response(self.llm, question, state["context"])
-        else:
-            state["answer"] = generate_general_response(self.llm, question)
+        try:
+            if state["question_type"] == "car_control":
+                state["answer"] = generate_control_response(question)
+            elif state["question_type"] == "car_data":
+                state["answer"] = generate_car_data_response(self.llm, question, state["context"])
+            else:
+                state["answer"] = generate_general_response(self.llm, question)
+        except Exception as e:
+            # 🆕 중단 요청으로 인한 예외 처리
+            if STOP_LLM_FLAG.is_set():
+                log("응답 생성 중 중단됨")
+                return "처리가 중단되었습니다."
+            log(f"응답 생성 오류: {e}")
+            state["answer"] = f"응답 생성 오류: {e}"
+
         log(f"응답 생성 완료, 소요 시간: {time.time() - start_step:.3f}s")
 
         log(f"process_question 총 소요 시간: {time.time() - start_total:.3f}s")

@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from typing import Optional
 from .car_data import CarDataSnapshot, BasicSensor, DTCInfo
+from .obd_finder import OBDFinder
 
 # 수집할 PID 매핑
 PID_MAPPING = {
@@ -44,26 +45,45 @@ PID_MAPPING = {
 class OBDConnector:
     """OBD-II 연결 및 데이터 수집 클래스"""
 
-    def __init__(self, port: str = "COM4", baudrate: int = 115200):
+    def __init__(self, port: str = None, baudrate: int = 115200):
         self.port = port
         self.baudrate = baudrate
         self.connection: Optional[obd.OBD] = None
 
     def connect(self) -> bool:
-        """OBD-II 연결 시도"""
+        """연결 시도 (RFCOMM 포트 자동 검색)"""
         try:
-            print(f"[INFO] Connecting to OBD-II on {self.port} @ {self.baudrate}...")
-            self.connection = obd.OBD(portstr=self.port, baudrate=self.baudrate, fast=False)
+            # 포트가 지정되지 않았으면 자동 검색
+            if not self.port:
+                finder = OBDFinder(verbose=True)
+                self.port = finder.find_obd_port()
+
+                if not self.port:
+                    print("[OBD] RFCOMM OBD 포트를 찾을 수 없음")
+                    return False
+
+                print(f"[OBD] 발견된 포트: {self.port}")
+
+            # 실제 OBD 연결
+            print(f"[OBD] {self.port} 연결 중 (baudrate: {self.baudrate})...")
+            self.connection = obd.OBD(
+                portstr=self.port,
+                baudrate=self.baudrate,
+                fast=False,
+                timeout=30
+            )
 
             if self.connection.is_connected():
-                print("[INFO] OBD-II Connected.")
+                status = self.connection.status()
+                protocol = status.protocol_name if status else "Unknown"
+                print(f"[OBD] 연결 성공! 프로토콜: {protocol}")
                 return True
             else:
-                print("[WARN] OBD not detected.")
+                print("[OBD] 연결 실패 (장치 응답 없음)")
                 return False
 
         except Exception as e:
-            print(f"[ERROR] OBD connection error: {e}")
+            print(f"[OBD] 연결 오류: {e}")
             return False
 
     def is_fake(self) -> bool:
@@ -71,8 +91,9 @@ class OBDConnector:
 
     def reconnect(self):
         """연결이 끊겼을 때 재연결"""
-        if self.connect():
-            return
+        if not self.is_connected():
+            self.connect()
+        return
 
     def is_connected(self) -> bool:
         """연결 상태 확인"""

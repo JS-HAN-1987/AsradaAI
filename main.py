@@ -24,7 +24,7 @@ HISTORY_SIZE = 3
 ESP_RECONNECT_INTERVAL = 10
 
 USE_FAKE_OBD = True
-USE_GPIO = False  # GPIO 사용 여부 (Windows에서는 False로 설정)
+USE_GPIO = True  # GPIO 사용 여부 (라즈베리파이에서는 True, Windows에서는 False로 설정)
 
 # ====================================
 # 전역 객체
@@ -38,7 +38,7 @@ else:
     print("[INFO] 🚗 실제 OBD 모드로 시작합니다.")
     from car_obd.obd_connector import OBDConnector
 
-    g_obd_connector = OBDConnector(port="COM4", baudrate=115200)
+    g_obd_connector = OBDConnector( )
 
 g_car_history = CarDataHistory(max_size=HISTORY_SIZE)
 g_alert_checker = AlertChecker()
@@ -50,22 +50,19 @@ g_esp = AsradaHeadOrchestrator(g_car_history, esp_hostname="esp8266-d3c2cf.local
 if USE_GPIO:
     try:
         import RPi.GPIO as GPIO
-
-        GPIO_AVAILABLE = True
         BUTTON_PIN = 17
     except ImportError as e:
         print(f"[WARN] RPi.GPIO를 불러올 수 없습니다: {e}")
         print("[WARN] GPIO 기능을 비활성화합니다.")
         USE_GPIO = False
-        GPIO_AVAILABLE = False
 else:
-    GPIO_AVAILABLE = False
     print("[INFO] GPIO 기능이 비활성화되었습니다.")
 
 
 def init_gpio_button():
     """GPIO 버튼 초기화"""
-    if not USE_GPIO or not GPIO_AVAILABLE:
+    global USE_GPIO, BUTTON_PIN  # 전역 변수 선언
+    if not USE_GPIO:
         print("[INFO] GPIO 비활성화 상태 - 버튼 초기화 건너뜀")
         return
 
@@ -82,7 +79,7 @@ def gpio_button_polling_loop():
     """
     버튼 1->0 변화를 폴링 방식으로 감지
     """
-    if not USE_GPIO or not GPIO_AVAILABLE:
+    if not USE_GPIO:
         print("[INFO] GPIO 비활성화 상태 - 버튼 폴링 루프 종료")
         return
 
@@ -92,7 +89,7 @@ def gpio_button_polling_loop():
         print(f"[ERROR] GPIO 입력 읽기 실패: {e}")
         return
 
-    while USE_GPIO and GPIO_AVAILABLE:
+    while USE_GPIO:
         try:
             cur = GPIO.input(BUTTON_PIN)
 
@@ -235,66 +232,102 @@ def main():
         g_esp.speak("OBD 연결 실패. Exception 발생")
 
     # -------------------------
-    # 입력 루프
+    # GPIO 활성화 여부에 따른 메인 루프 분기
     # -------------------------
-    print("\n" + "=" * 60)
-    print(f"시스템 상태: OBD={'가상' if USE_FAKE_OBD else '실제'}, GPIO={'활성화' if USE_GPIO else '비활성화'}")
-    print("입력 테스트: 질문 직접 입력 = STT 건너뛰기 모드")
-    print("t 입력 시 STT 포함 전체 시퀀스")
-    print("c 입력 시 현재 진행 중인 이벤트 중단")
-    print("q 입력 시 종료")
-    print("=" * 60 + "\n")
+    if USE_GPIO:
+        # GPIO 모드: 키보드 입력 없이 무한 대기
+        print("\n" + "=" * 60)
+        print("GPIO 모드: 키보드 입력 비활성화")
+        print("ESP 버튼 또는 GPIO 버튼으로 동작")
+        print("프로그램 종료: Ctrl+C")
+        print("=" * 60 + "\n")
 
-    try:
-        while True:
-            status_indicator = "🟢" if g_esp.is_connected() else "🔴"
+        try:
+            # 무한 대기 (키보드 입력 없음)
+            while True:
+                # ESP 연결 상태 확인 및 재연결
+                if not g_esp.is_connected():
+                    try:
+                        esp_connected = g_esp.connect()
+                        if esp_connected:
+                            g_esp.servo_set(2, 90)
+                            print("[INFO] ESP 재연결 성공")
+                    except Exception as e:
+                        print(f"[WARN] ESP 연결 실패: {e}")
 
-            if not g_esp.is_connected():
+                # 상태 표시
+                status = "🟢" if g_esp.is_connected() else "🔴"
+                print(f"{status} ESP: {'연결됨' if g_esp.is_connected() else '연결끊김'} | ", end="")
+                print(f"OBD: {'연결됨' if g_obd_connector.is_connected() else '연결끊김'}", end="\r")
+
+                time.sleep(5)  # 5초마다 상태 체크
+
+        except KeyboardInterrupt:
+            print("\n[INFO] 프로그램 종료 (Ctrl+C)")
+
+    else:
+        # GPIO 비활성화 모드: 키보드 입력 활성화
+        print("\n" + "=" * 60)
+        print(f"시스템 상태: OBD={'가상' if USE_FAKE_OBD else '실제'}, GPIO={'활성화' if USE_GPIO else '비활성화'}")
+        print("입력 테스트: 질문 직접 입력 = STT 건너뛰기 모드")
+        print("t 입력 시 STT 포함 전체 시퀀스")
+        print("c 입력 시 현재 진행 중인 이벤트 중단")
+        print("q 입력 시 종료")
+        print("=" * 60 + "\n")
+
+        try:
+            while True:
+                status_indicator = "🟢" if g_esp.is_connected() else "🔴"
+
+                if not g_esp.is_connected():
+                    try:
+                        esp_connected = g_esp.connect()
+                        if esp_connected:
+                            g_esp.servo_set(2, 90)
+                            g_esp.speak("ESP 연결 성공")
+                    except Exception as e:
+                        print(f"[WARN] ESP 연결 실패: {e}")
+
+                line = input(f"{status_indicator} > ").strip()
+
+                if line.lower() == "q":
+                    break
+                elif line.lower() == "c":
+                    # 중단 명령
+                    g_esp.cancel_current_event()
+                    print("[MAIN] 현재 진행 중인 이벤트 중단 요청")
+                elif line.lower() == "t":
+                    threading.Thread(
+                        target=g_esp.on_button_press_event,
+                        args=("full",),
+                        daemon=True
+                    ).start()
+                else:
+                    threading.Thread(
+                        target=g_esp.on_button_press_event,
+                        args=("skip_stt", line),
+                        daemon=True
+                    ).start()
+
+        except KeyboardInterrupt:
+            print("\n[INFO] 프로그램 종료")
+
+        # ====================================
+        # 종료 처리 (공통)
+        # ====================================
+        finally:
+            # GPIO 정리 (활성화된 경우만)
+            if USE_GPIO:
                 try:
-                    esp_connected = g_esp.connect()
-                    if esp_connected:
-                        g_esp.servo_set(2, 90)
-                        g_esp.speak("ESP 연결 성공")
+                    GPIO.cleanup()
+                    print("[INFO] GPIO 정리 완료")
                 except Exception as e:
-                    print(f"[WARN] ESP 연결 실패: {e}")
+                    print(f"[WARN] GPIO 정리 중 오류: {e}")
 
-            line = input(f"{status_indicator} > ").strip()
-
-            if line.lower() == "q":
-                break
-            elif line.lower() == "c":
-                # 중단 명령
-                g_esp.cancel_current_event()
-                print("[MAIN] 현재 진행 중인 이벤트 중단 요청")
-            elif line.lower() == "t":
-                threading.Thread(
-                    target=g_esp.on_button_press_event,
-                    args=("full",),
-                    daemon=True
-                ).start()
-            else:
-                threading.Thread(
-                    target=g_esp.on_button_press_event,
-                    args=("skip_stt", line),
-                    daemon=True
-                ).start()
-
-    except KeyboardInterrupt:
-        print("\n[INFO] 프로그램 종료")
-
-    finally:
-        # GPIO 정리 (활성화된 경우만)
-        if USE_GPIO and GPIO_AVAILABLE:
-            try:
-                GPIO.cleanup()
-                print("[INFO] GPIO 정리 완료")
-            except Exception as e:
-                print(f"[WARN] GPIO 정리 중 오류: {e}")
-
-        # OBD 연결 종료
-        if g_obd_connector:
-            g_obd_connector.disconnect()
-            print(f"[INFO] OBD 수집 종료 - 총 {g_car_history.size()}개 스냅샷")
+            # OBD 연결 종료
+            if g_obd_connector:
+                g_obd_connector.disconnect()
+                print(f"[INFO] OBD 수집 종료 - 총 {g_car_history.size()}개 스냅샷")
 
 
 if __name__ == "__main__":
